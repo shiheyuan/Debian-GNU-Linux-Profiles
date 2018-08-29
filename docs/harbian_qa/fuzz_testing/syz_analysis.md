@@ -159,7 +159,7 @@ func (c *command) exec(opts *ExecOpts, progData []byte) (output []byte, failed, 
 	// At this point program is executing.
 	......	
 ```  
-### Recive data from fuzzer 
+### Receive data from fuzzer 
 On the executor side, it just read the input from fuzzer and run the syscalls. 
 'executor' is run by fuzzer. First, it remap its input/output. 'do_sandbox_*' fork child process to get data and run syscalls.
 In executor_linux.cc:
