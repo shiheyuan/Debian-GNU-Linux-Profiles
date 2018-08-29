@@ -1,0 +1,379 @@
+# ELK with Bro-based Application Layer Packet Classifier
+## Topology introduction 
+
+The application identification system will identify the application and generate logs by bro. The ELK is deployed at the remote end for all logs to be collected, analyzed, stored, and identifiable. The BRO is installed on a machine with an IP of 192.168.1.147 and the ELK is installed on a machine with an IP of 192.168.1.142. 
+
+## Deployed system release   
+Debian GNU/Linux 9.4.0   
+
+
+## Convention Description  
+``` 
+ens33              a network interface name    
+192.168.1.147      a network interface ipv4 address of bro device    
+192.168.1.142      a network interface ipv4 address of ELK device 
+``` 
+
+## Install bro 
+
+Because the metron-bro-plugin-kafka plugin will rely on the source code of the brother to compile and install. So, use the bro source code to install.
+
+### Pre-install package  
+```
+~/src$ sudo apt-get install -y tcpdump git vim cmake make gcc g++ flex bison libpcap-dev python-dev swig zlib1g-dev libssl1.0-dev dirmngr curl openjdk-8-jre zookeeperd 
+```
+
+### Download bro source and verify 
+```
+~/src$ wget https://www.bro.org/downloads/bro-2.5.4.tar.gz 
+~/src$ wget https://www.bro.org/downloads/bro-2.5.4.tar.gz.asc 
+~/src$ gpg --recv-keys C68B494DF56ACC7E
+~/src$ gpg -v bro-2.5.4.tar.gz.asc
+```
+
+### Install 
+```
+~/src$ tar -xvf bro-2.5.4.tar.gz 
+~/src$ cd bro-2.5.4/ 
+~/src/bro-2.5.4$ ./configure --enable-debug 
+~/src/bro-2.5.4$ make 
+~/src/bro-2.5.4$ sudo make install 
+``` 
+
+### Set env value  
+
+Bro install to dir is /usr/local/bro/bin/，add following line to /etc/bash.bashrc：
+``` 
+if [ -d /usr/local/bro/bin ];then
+	PATH="/usr/local/bro/bin/:$PATH"
+	export PATH
+fi
+``` 
+
+### Set bro to systemd and satrt bro service 
+
+```
+~# cat > /etc/systemd/system/bro.service << EOL
+[Unit]
+Description=Bro
+After=network.target
+
+[Service]
+ExecStartPre=/usr/local/bro/bin/broctl cleanup
+ExecStartPre=/usr/local/bro/bin/broctl check
+ExecStartPre=/usr/local/bro/bin/broctl install
+ExecStart=/usr/local/bro/bin/broctl start
+ExecStop=/usr/local/bro/bin/broctl stop
+RestartSec=10s
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStopSec=600
+
+[Install]
+WantedBy=multi-user.target
+
+EOL
+
+~# systemctl daemon-reload   
+~# systemctl enable bro  
+~# systemctl start bro   
+```
+
+For detailed installation and use of bro, please refer to the [how-to-deploy-bro-app-identification-env.mkd](https://github.com/hardenedlinux/Debian-GNU-Linux-Profiles/blob/master/NSM/docs/how-to-deploy-bro-app-identification-env.mkd) documentation.
+
+### Add a local parse configuration file to BRO 
+
+The following will use an example to explain, local bro parse configuration is [bro_parse_jd.bro](https://github.com/hardenedlinux/Debian-GNU-Linux-Profiles/blob/master/NSM/sensor/bro/scripts/frameworks/software/own-software/bro_parse_jd.bro).  
+
+Create a directory called harbian under the directory /usr/local/bro/share/bro/site and place the bro_parse_jd.bro file in this directory. Then create a file named \_\_load\_\_.bro in the harbian directory, enter the following line in the \_\_load\_\_.bro file:  
+```
+@load ./bro_parse_jd.bro.
+``` 
+
+The \_\_load\_\_.bro file is only used to automatically load the bro configuration file in the current directory when the bro is started. Also need to add the following line to the file /usr/local/bro/share/bro/site/local.bro: 
+```
+@load ./harbian 
+```
+
+Then use the following command to restart the bro service:
+```
+~# systemctl restart bro 
+```
+
+### Install Kafka 
+
+#### Download kafka source 
+```
+~/src$ wget https://archive.apache.org/dist/kafka/1.0.0/kafka_2.12-1.0.0.tgz 
+~/src$ wget https://archive.apache.org/dist/kafka/1.0.0/kafka_2.12-1.0.0.tgz.asc 
+```
+
+#### Verify 
+```
+~/src$ gpg --recv-keys  3B417B9B 
+~/src$ gpg -v kafka_2.12-1.0.0.tgz.asc 
+```
+
+#### Install kafka and start service 
+```
+~/src$ tar -xvf kafka_2.12-1.0.0.tgz
+~/src$ sudo mv kafka_2.12-1.0.0 /opt/kafka
+~/src$ sudo sed -i '/^log.dirs/{s/=.*//;}' /opt/kafka/config/server.properties
+~/src$ sudo sed -i 's/^log.dirs/log.dirs=\/var\/lib\/kafka/' /opt/kafka/config/server.properties
+~/src$ sudo sed -i '$alisteners=bro://192.168.1.147:9092' /opt/kafka/config/server.properties 
+
+~/src# cat > /etc/systemd/system/kafka.service << EOF
+[Unit]
+Description=Kafka Service
+Wants=network.target
+After=zookeeper.target
+
+[Service]
+ExecStart=/opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/server.properties
+ExecReload=on-failure
+Restart=always
+User=root
+Group=root
+StandardOutput=syslog
+StandardError=syslog
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+```
+
+#### Enable kafka service and start 
+
+When the kafka service is started, the zookeeper service must have been started. 
+``` 
+~/src$ sudo systemctl enable zookeeper 
+~/src$ sudo systemctl start zookeeper
+~/src$ sudo systemctl daemon-reload
+~/src$ sudo systemctl enable kafka 
+~/src$ sudo systemctl start kafka
+```
+
+### Install metron-bro-plugin-kafka
+
+#### Install librdkafka 
+```
+~/src$ curl -L https://github.com/edenhill/librdkafka/archive/v0.9.4.tar.gz | tar xvz 
+~/src$ cd librdkafka-0.9.4/ 
+~/src/librdkafka-0.9.4$ ./configure --enable-sasl 
+~/src/librdkafka-0.9.4$ make 
+~/src/librdkafka-0.9.4$ sudo make install 
+```
+
+#### Build the plugin 
+```
+~/src$ git clone https://github.com/apache/metron-bro-plugin-kafka.git
+~/src$ cd metron-bro-plugin-kafka
+~/src/metron-bro-plugin-kafka$ ./configure --bro-dist=$HOME/src/bro-2.5.4/
+~/src/metron-bro-plugin-kafka$ make 
+~/src/metron-bro-plugin-kafka$ sudo make install
+```
+ 
+#### Ensure the plugin was installed 
+```
+~/src# bro -N Apache::Kafka 
+``` 
+
+### How to set bro logs to kafka 
+
+Set following lines to /usr/local/bro/share/bro/site/local.bro: 
+```
+@load /usr/local/bro/lib/bro/plugins/APACHE_KAFKA/scripts/Apache/Kafka/logs-to-kafka.bro
+redef Kafka::topic_name = "";
+redef Kafka::logs_to_send = set(Conn::LOG, HTTP::LOG, DNS::LOG, SMTP::LOG, SSL::LOG, Software::LOG, DHCP::LOG, FTP::LOG, IRC::LOG, Notice::LOG, X509::LOG, SSH::LOG, SNMP::LOG);
+redef Kafka::kafka_conf = table(["metadata.broker.list"] = "192.168.1.147:9092");
+```
+
+### Ensure bro logs to kafka 
+
+following command to check:
+```
+~/src# systemctl status kafka | grep "Active:.active"
+   Active: active (running) since Tue 2018-07-24 03:25:10 CST; 23min ago
+
+~/src# netstat -ntpl  | grep 9092
+tcp6       0      0 192.168.1.147:9092      :::*                    LISTEN      30913/java 
+
+~/src$ ls /var/lib/kafka/bro-0/00000000000000000000.log 
+```
+
+## Install ELK 
+
+### Pre-install package 
+
+```
+~$ sudo apt-get install -y openjdk-8-jre curl wget libgeoip-dev 
+```
+
+### Download ELK deb package and SHA512 (512-bit) checksums file 
+```
+~$ mkdir src; cd src 
+~/src$ wget https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-6.3.0.deb 
+~/src$ wget https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-6.3.0.deb.sha512 
+~/src$ wget https://artifacts.elastic.co/downloads/logstash/logstash-6.3.0.deb 
+~/src$ wget https://artifacts.elastic.co/downloads/logstash/logstash-6.3.0.deb.sha512 
+~/src$ wget https://artifacts.elastic.co/downloads/kibana/kibana-6.3.0-amd64.deb 
+~/src$ wget https://artifacts.elastic.co/downloads/kibana/kibana-6.3.0-amd64.deb.sha512 
+```
+
+### Verify ELK deb package 
+```
+~/src$ sha512sum -c elasticsearch-6.3.0.deb.sha512  
+elasticsearch-6.3.0.deb: OK
+~/src$ sha512sum -c logstash-6.3.0.deb.sha512 
+logstash-6.3.0.deb: OK
+~/src$ sha512sum -c kibana-6.3.0-amd64.deb.sha512 
+kibana-6.3.0-amd64.deb: OK
+```
+
+### Install ELK deb package 
+```
+~/src$ sudo dpkg -i *.deb 
+```
+
+### Logstash configuration  
+``` 
+~/src$ echo config.reload.automatic: true |sudo tee -a /etc/logstash/logstash.yml
+~/src$ echo config.reload.interval: 3s |sudo tee -a /etc/logstash/logstash.yml
+```
+
+### Create new logstash configuration 
+
+The conf file will be generated for each type of log. The following is only an example of software: 
+
+```
+~/src# cat > /etc/logstash/conf.d/bro-software.conf << EOF 
+input {
+	kafka {
+		topics => ["software"]
+		group_id => "bro_logstash"
+     		bootstrap_servers => "192.168.1.147:9092"
+     		codec => json
+     		auto_offset_reset => "earliest"
+   	}
+}
+
+output {
+	elasticsearch {
+     		hosts => ["192.168.1.142:9200"]
+		index => "bro-software"
+		document_type => "software"
+   	}
+}
+
+``` 
+
+Other conf files are stored in the [logstash-conf](https://github.com/hardenedlinux/Debian-GNU-Linux-Profiles/tree/master/NSM/ELK/conf). Put these configuration files in the /etc/logstash/conf.d directory. 
+
+
+### Elasticsearch configuration 
+#### Bind Elasticsearch to localhost 
+Following lines to /etc/elasticsearch/elasticsearch.yml:
+```
+network.host: "192.168.1.142" 
+http.port:9200 
+```
+
+If elasticsearch service is remote, set the bind address to a specific IP.  
+
+#### Ensure elasticsearch is working 
+```
+sudo systemctl start elasticsearch 
+curl http://192.168.1.142:9200
+{
+  "name" : "VZDjFmY",
+  "cluster_name" : "elasticsearch",
+  "cluster_uuid" : "xql3xQSbSvinXDIYchwswQ",
+  "version" : {
+    "number" : "6.3.0",
+    "build_flavor" : "default",
+    "build_type" : "deb",
+    "build_hash" : "424e937",
+    "build_date" : "2018-06-11T23:38:03.357887Z",
+    "build_snapshot" : false,
+    "lucene_version" : "7.3.1",
+    "minimum_wire_compatibility_version" : "5.6.0",
+    "minimum_index_compatibility_version" : "5.0.0"
+  },
+  "tagline" : "You Know, for Search"
+}
+```
+
+### Kibana configuration 
+
+Enter the following lines to Kibana configuration file /etc/kibana/kibana.yml: 
+``` 
+server.port: 5601
+server.host: "192.168.1.142"
+elasticsearch.url: "http://192.168.1.142:9200"
+```
+
+### Start ELK service 
+```
+~/src$ sudo /bin/systemctl daemon-reload
+~/src$ sudo /bin/systemctl enable elasticsearch.service logstash.service kibana.service
+~/src$ sudo systemctl start elasticsearch.service kibana.service logstash.service
+``` 
+
+### Use Kibana 
+
+#### Open Kibana 
+
+Enter 192.168.1.142:5601 in the address bar of the browser. The page that opens is as shown below: 
+
+![Open Kibana](./image/kibana-open.png)  
+
+#### Create index pattern 
+
+The following will be an example of creating a pattern with the software log. 
+
+![Create_software_01](./image/create_pattern_1.png)   
+
+![Create_software_02](./image/create_pattern_2.png)   
+
+![Create_software_03](./image/create_pattern_3.png)   
+
+![Create_software_04](./image/create_pattern_4.png)   
+
+![Create_software_05](./image/create_pattern_5.png)   
+
+#### Discover software index pattern 
+
+![Create_software_01](./image/discover_software.png)   
+
+#### Create visualize  
+
+![Create_software_01](./image/create_visualize-1.png)   
+
+![Create_software_01](./image/create_visualize-2.png)   
+
+![Create_software_01](./image/create_visualize-3.png)   
+
+![Create_software_01](./image/create_visualize-4.png)   
+
+![Create_software_01](./image/create_visualize-5.png)   
+
+![Create_software_01](./image/create_visualize-6.png)   
+
+## Reference  
+
+https://www.bro.org   
+http://try.bro.org/   
+https://www.bro.org/sphinx/scripts/base/frameworks/software/main.bro.html   
+https://www.bro.org/sphinx/scripts/base/bif/plugins/Bro_HTTP.events.bif.bro.html   
+https://www.bro.org/sphinx/scripts/base/bif/plugins/Bro_SSL.events.bif.bro.html   
+https://www.elastic.co/guide/en/logstash/current/plugins-inputs-kafka.html   
+https://www.elastic.co/guide/en/logstash/6.3/plugins-outputs-elasticsearch.html   
+https://www.elastic.co/    
+https://github.com/apache/metron-bro-plugin-kafka  
+
+
+
+
+
+

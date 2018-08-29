@@ -15,7 +15,7 @@ Add the follow-up option to  ~/.bashrc
 - The path of golang compiler pack:  
 
 `export GOROOT=/home/root/go`  
-`export PATH=$GOROOT/bin;$PATH`  
+`export PATH=$GOROOT/bin:$PATH`  
 - The diryory golang work in:  
 
 `export GOPATH=/home/root/syzkalls/`  
@@ -81,7 +81,7 @@ Try to ssh to VM:
 ### Copy syzkaller binary to vm  
 `scp -P $(SSH_PORT) -i ~/.ssh/id_rsa  -r $(GOPATH)/bin root@127.0.0.1:/root/bin`  
 <b>Add PATH to environment in vm:</b>  
-`export PATH=/home/root/bin:&PATH`  
+`export PATH=/home/root/bin:$PATH`  
 
 ## Run syzkaller with custom kernel
 ### Check the configure option follow-up
